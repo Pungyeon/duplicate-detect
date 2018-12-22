@@ -1,0 +1,8 @@
+[package]
+name = "my_crate"
+version = "0.1.0"
+authors = ["Lasse Martin Jakobsen <lasse@tengen.dk>"]
+edition = "2018"
+
+[dependencies]
+rust-crypto = "^0.2"
