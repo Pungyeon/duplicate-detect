@@ -13,6 +13,34 @@ extern crate ring;
 use data_encoding::HEXUPPER;
 use ring::digest::{Context, Digest, SHA256};
 
+struct FileIndex {
+    hmap: HashMap<String, String>,
+    dupes: HashMap<String, String>,
+    count: i64,
+}
+
+impl FileIndex {
+    fn increment(&mut self) {
+        self.count += 1;
+    }
+
+    fn insert_index(&mut self, hash: String, name: String) {
+        self.hmap.insert(hash, name);
+    }
+
+    fn insert_dupe(&mut self, file: String, copy: String) {
+        self.dupes.insert(file, copy);
+    }
+    
+    fn insert(&mut self, hash: String, filepath: String) {
+        if self.hmap.contains_key(&hash) {
+            let d = self.hmap.get(&hash).unwrap();
+            self.insert_dupe(d.to_string(), filepath.clone());
+        }
+        self.insert_index(hash, filepath.clone());
+    }
+}
+
 fn sha256_digest<R: Read>(mut reader : R) -> Result<Digest, String> {
     let mut context = Context::new(&SHA256);
     let mut buffer = [0; 1024];
@@ -28,7 +56,7 @@ fn sha256_digest<R: Read>(mut reader : R) -> Result<Digest, String> {
     Ok(context.finish())
 }
 
-fn traverse_dir(path: String, hmap: &mut HashMap<String, String>, dupes: &mut HashMap<String, String>, total_files: &mut i64, verbose: bool) {
+fn traverse_dir(path: String, index: &mut FileIndex, verbose: bool) {
     let files = match fs::read_dir(path.clone()) {
         Ok(files) => files,
         Err(why) => {
@@ -40,12 +68,11 @@ fn traverse_dir(path: String, hmap: &mut HashMap<String, String>, dupes: &mut Ha
     for entry in files {
         let entry = entry.unwrap();
         let filepath = &entry.path().to_str().unwrap().to_string();
-        let metadata = fs::metadata(&entry.path()).unwrap();
-        let filetype = metadata.clone().file_type();
+        let filetype = fs::metadata(&entry.path()).unwrap().file_type();
 
 
         if filetype.clone().is_file() {
-            *total_files += 1;
+            index.increment();
             let file = match File::open(&entry.path()) {
                 Ok(file) => file,
                 Err(why) => {
@@ -54,34 +81,28 @@ fn traverse_dir(path: String, hmap: &mut HashMap<String, String>, dupes: &mut Ha
                 },
             };
             
-            let reader = BufReader::new(file);
-            let digest = sha256_digest(reader).unwrap();
-            let hashstring = HEXUPPER.encode(digest.as_ref());
+            let hashstring = HEXUPPER.encode(
+                sha256_digest(BufReader::new(file)).unwrap().as_ref()
+            );
+            index.insert(hashstring, filepath.clone());
 
-            if verbose {
-                println!("checking file: {}", filepath.clone());
-            }
-
-            if hmap.contains_key(&hashstring) {
-                let d = hmap.get(&hashstring).unwrap();
-                dupes.insert(d.to_string(), filepath.clone());
-            }
-
-            hmap.insert(hashstring, filepath.clone());
+            if verbose { println!("checking file: {}", filepath.clone()) }
         }
 
         if filetype.clone().is_dir() {
-            traverse_dir(filepath.clone(), hmap, dupes, total_files, verbose);
+            traverse_dir(filepath.clone(), index, verbose);
         }
     }
 }
 
 fn main() {
-    let mut hmap : HashMap<String, String> = HashMap::new();
-    let mut dupes : HashMap<String, String> = HashMap::new();
-    let mut total_files = 0;
-    let now = SystemTime::now();
+    let mut file_index : FileIndex = FileIndex{
+        hmap : HashMap::new(),
+        dupes : HashMap::new(),
+        count: 0,
+    };
 
+    let now = SystemTime::now();
     let args : Vec<String> = env::args().collect();
 
     if args.len() < 2 {
@@ -100,13 +121,13 @@ fn main() {
         }
     }
 
-    traverse_dir(args[1].to_string(), &mut hmap, &mut dupes, &mut total_files, verbose);
+    traverse_dir(args[1].to_string(), &mut file_index, verbose);
 
     println!("DUPLICATES FOUND:");
-    for d in dupes {
+    for d in file_index.dupes {
         println!("file: {}, copy: {}", d.0, d.1);
     }
-    println!("TOTAL FILES TRAVERSED: {}", total_files);
+    println!("TOTAL FILES TRAVERSED: {}", file_index.count);
     println!("ELAPSED TIME: {}s", now.elapsed().unwrap().as_secs());
 
 }
