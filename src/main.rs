@@ -17,11 +17,16 @@ struct FileIndex {
     hmap: HashMap<String, String>,
     dupes: HashMap<String, String>,
     count: i64,
+    dupe_size: u64,
 }
 
 impl FileIndex {
     fn increment(&mut self) {
         self.count += 1;
+    }
+
+    fn duplication_size_increment(&mut self, size: u64) {
+        self.dupe_size += size;
     }
 
     fn insert_index(&mut self, hash: String, name: String) {
@@ -32,10 +37,11 @@ impl FileIndex {
         self.dupes.insert(file, copy);
     }
     
-    fn insert(&mut self, hash: String, filepath: String) {
+    fn insert(&mut self, hash: String, filepath: String, filesize: u64) {
         if self.hmap.contains_key(&hash) {
             let d = self.hmap.get(&hash).unwrap();
             self.insert_dupe(d.to_string(), filepath.clone());
+            self.duplication_size_increment(filesize);
         }
         self.insert_index(hash, filepath.clone());
     }
@@ -68,11 +74,12 @@ fn traverse_dir(path: String, index: &mut FileIndex, verbose: bool) {
     for entry in files {
         let entry = entry.unwrap();
         let filepath = &entry.path().to_str().unwrap().to_string();
-        let filetype = fs::metadata(&entry.path()).unwrap().file_type();
-
+        let metadata = fs::metadata(&entry.path()).unwrap();
+        let filetype = metadata.clone().file_type();
 
         if filetype.clone().is_file() {
             index.increment();
+
             let file = match File::open(&entry.path()) {
                 Ok(file) => file,
                 Err(why) => {
@@ -84,7 +91,7 @@ fn traverse_dir(path: String, index: &mut FileIndex, verbose: bool) {
             let hashstring = HEXUPPER.encode(
                 sha256_digest(BufReader::new(file)).unwrap().as_ref()
             );
-            index.insert(hashstring, filepath.clone());
+            index.insert(hashstring, filepath.clone(), metadata.clone().len());
 
             if verbose { println!("checking file: {}", filepath.clone()) }
         }
@@ -100,6 +107,7 @@ fn main() {
         hmap : HashMap::new(),
         dupes : HashMap::new(),
         count: 0,
+        dupe_size: 0,
     };
 
     let now = SystemTime::now();
@@ -128,6 +136,7 @@ fn main() {
         println!("file: {}, copy: {}", d.0, d.1);
     }
     println!("TOTAL FILES TRAVERSED: {}", file_index.count);
+    println!("TOTAL FILE SIZE: {}", file_index.dupe_size);
     println!("ELAPSED TIME: {}s", now.elapsed().unwrap().as_secs());
 
 }
