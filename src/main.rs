@@ -1,11 +1,13 @@
 use std::fs;
 use std::env;
 use std::fs::File;
-// use std::io::prelude::*;
-use std::collections::HashMap;
+use std::collections::{hash_map, HashMap};
+use std::fmt::{Display, Formatter};
 use std::io::{BufReader, Read};
-use std::error::Error;
+use std::path::PathBuf;
 use std::time::{SystemTime};
+use std::sync::{Arc, Mutex};
+use std::sync::mpsc::channel;
 
 extern crate data_encoding;
 extern crate ring;
@@ -13,14 +15,62 @@ extern crate ring;
 use data_encoding::HEXUPPER;
 use ring::digest::{Context, Digest, SHA256};
 
+#[derive(Debug)]
+struct Error {
+    msg: String,
+}
+
+impl Display for Error {
+    fn fmt(&self, f: &mut Formatter) -> std::fmt::Result {
+        write!(f, "{}", self.msg)
+    }
+}
+
+impl From<std::io::Error> for Error {
+    fn from(err: std::io::Error) -> Self {
+        Error{
+            msg: err.to_string(),
+        }
+    }
+}
+
+impl From<String> for Error {
+    fn from(s: String) -> Self {
+        Error{
+            msg: s,
+        }
+    }
+}
+
+struct DuplicateMeta {
+    filename: String,
+    duplicates: Vec<String>,
+}
+
+impl DuplicateMeta {
+    fn new(filename: String) -> Self {
+        DuplicateMeta{
+            filename,
+            duplicates: Vec::new(),
+        }
+    }
+}
+
 struct FileIndex {
-    hmap: HashMap<String, String>,
-    dupes: HashMap<String, String>,
+    files: HashMap<String, DuplicateMeta>,
     count: i64,
     dupe_size: u64,
 }
 
 impl FileIndex {
+    fn new() -> Self {
+        FileIndex{
+            files: HashMap::new(),
+            count: 0,
+            dupe_size: 0,
+        }
+    }
+
     fn increment(&mut self) {
         self.count += 1;
     }
@@ -29,30 +79,22 @@ impl FileIndex {
         self.dupe_size += size;
     }
 
-    fn insert_index(&mut self, hash: String, name: String) {
-        self.hmap.insert(hash, name);
-    }
-
-    fn insert_dupe(&mut self, file: String, copy: String) {
-        self.dupes.insert(file, copy);
-    }
-    
     fn insert(&mut self, hash: String, filepath: String, filesize: u64) {
-        if self.hmap.contains_key(&hash) {
-            let d = self.hmap.get(&hash).unwrap();
-            self.insert_dupe(d.to_string(), filepath.clone());
+        if let hash_map::Entry::Vacant(e) = self.files.entry(hash.clone()) {
+            e.insert(DuplicateMeta::new(filepath));
+        } else {
+            self.files.get_mut(&hash).unwrap().duplicates.push(filepath);
             self.duplication_size_increment(filesize);
         }
-        self.insert_index(hash, filepath.clone());
     }
 }
 
-fn sha256_digest<R: Read>(mut reader : R) -> Result<Digest, String> {
+fn sha256_digest<R: Read>(mut reader : R) -> Result<Digest, Error> {
     let mut context = Context::new(&SHA256);
     let mut buffer = [0; 1024];
 
     loop {
-        let count = reader.read(&mut buffer).unwrap();
+        let count = reader.read(&mut buffer)?;
         if count == 0 {
             break;
         }
@@ -62,81 +104,89 @@ fn sha256_digest<R: Read>(mut reader : R) -> Result<Digest, String> {
     Ok(context.finish())
 }
 
-fn traverse_dir(path: String, index: &mut FileIndex, verbose: bool) {
-    let files = match fs::read_dir(path.clone()) {
-        Ok(files) => files,
-        Err(why) => {
-            println!("error: could not read folder: {}: reason: {}", path.clone().to_string(), why.description());
-            return
-        },
-    };
+// ELAPSED TIME: 759s
+fn traverse_parallel(path: &str) {
+    let value = Arc::new(Mutex::new(FileIndex::new()));
 
-    for entry in files {
-        let entry = entry.unwrap();
-        let filepath = &entry.path().to_str().unwrap().to_string();
-        let metadata = fs::metadata(&entry.path()).unwrap();
-        let filetype = metadata.clone().file_type();
+    traverse_parallel_dir(&path, value.clone());
 
-        if filetype.clone().is_file() {
-            index.increment();
-
-            let file = match File::open(&entry.path()) {
-                Ok(file) => file,
-                Err(why) => {
-                    println!("error: could not open file: {}: reason: {}", filepath, why.description());
-                    continue;
-                },
-            };
-            
-            let hashstring = HEXUPPER.encode(
-                sha256_digest(BufReader::new(file)).unwrap().as_ref()
-            );
-            index.insert(hashstring, filepath.clone(), metadata.clone().len());
-
-            if verbose { println!("checking file: {}", filepath.clone()) }
+    println!("DUPLICATES FOUND:");
+    for (key, value) in value.lock().unwrap().files.iter() {
+        if !value.duplicates.is_empty() {
+            println!("(hash: {}): (file: {})", key, value.filename);
+            for duplicate in value.duplicates.iter() {
+                println!("\t{}", duplicate);
+            }
         }
+    }
+    println!("TOTAL FILES TRAVERSED: {}", value.lock().unwrap().count);
+    println!("TOTAL FILE SIZE: {}", value.lock().unwrap().dupe_size);
+}
 
-        if filetype.clone().is_dir() {
-            traverse_dir(filepath.clone(), index, verbose);
+fn traverse_parallel_dir(path: &str, value: Arc<Mutex<FileIndex>>) {
+    let entries = fs::read_dir(path).unwrap();
+    let mut threads = Vec::new();
+
+    for entry in entries {
+        let p = entry.unwrap().path();
+        if p.is_dir() {
+            traverse_parallel_dir(p.to_str().unwrap(), value.clone());
+        } else {
+            let value = value.clone();
+            let thread = std::thread::spawn(move || {
+                handle_file(p, value);
+            });
+            threads.push(thread);
+        }
+    }
+
+    for thread in threads {
+        if let Err(e) = thread.join() {
+            panic!("{:?}", e);
         }
     }
 }
 
-fn main() {
-    let mut file_index : FileIndex = FileIndex{
-        hmap : HashMap::new(),
-        dupes : HashMap::new(),
-        count: 0,
-        dupe_size: 0,
+fn handle_file(p: PathBuf, value: Arc<Mutex<FileIndex>>) {
+    value.lock().unwrap().increment();
+
+    let filepath = p.to_str().unwrap().to_string();
+    let file = match File::open(&p) {
+        Ok(file) => file,
+        Err(err) => {
+            println!("error: could not open file: {}: reason: {}", filepath, err);
+            return
+        }
     };
 
+    let dig = BufReader::new(file);
+    let hashstring = HEXUPPER.encode(
+        sha256_digest(dig).unwrap().as_ref()
+    );
+
+    let metadata = fs::metadata(p).unwrap();
+    value.lock().unwrap().insert(hashstring, filepath, metadata.len());
+}
+
+// ELAPSED TIME: 137s
+// ELAPSED TIME: 165s
+fn main() {
     let now = SystemTime::now();
     let args : Vec<String> = env::args().collect();
 
     if args.len() < 2 {
-        println!("you must provide one command line argument, to run this program:");
-        println!("\tdupe_detect.exe [starting folder]");
-        println!("parameters:");
-        println!("\t-v: set verbose to true, to print progress");
-        return 
+        help();
+        return
     }
 
-    let mut verbose = false;
+    traverse_parallel(args[1].as_str());
 
-    if args.len() > 2 {
-        if args[2].to_string() == "-v" {
-            verbose = true;
-        }
-    }
-
-    traverse_dir(args[1].to_string(), &mut file_index, verbose);
-
-    println!("DUPLICATES FOUND:");
-    for d in file_index.dupes {
-        println!("file: {}, copy: {}", d.0, d.1);
-    }
-    println!("TOTAL FILES TRAVERSED: {}", file_index.count);
-    println!("TOTAL FILE SIZE: {}", file_index.dupe_size);
     println!("ELAPSED TIME: {}s", now.elapsed().unwrap().as_secs());
+}
 
+fn help() {
+    println!("you must provide one command line argument, to run this program:");
+    println!("\tdupe_detect.exe [starting folder]");
+    println!("parameters:");
+    println!("\t-v: set verbose to true, to print progress");
 }
