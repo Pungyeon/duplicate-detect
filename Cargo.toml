@@ -1,5 +1,5 @@
 [package]
-name = "my_crate"
+name = "duplicates"
 version = "0.1.0"
 authors = ["Lasse Martin Jakobsen <lasse@tengen.dk>"]
 edition = "2018"
