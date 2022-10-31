@@ -115,7 +115,6 @@ impl Traverser {
         }
     }
 
-    // ELAPSED TIME: 759s
     fn parallel(&self, path: &str) {
         let now = SystemTime::now();
         let value = Arc::new(Mutex::new(FileIndex::new()));
