@@ -5,6 +5,7 @@ authors = ["Lasse Martin Jakobsen <lasse@tengen.dk>"]
 edition = "2018"
 
 [dependencies]
-rust-crypto = "^0.2"
-ring = "^0.13.5"
-data-encoding = "^2.1.1"
+rust-crypto = "0.2"
+ring = "0.16"
+data-encoding = "2.3"
+threadpool = "1.8"
