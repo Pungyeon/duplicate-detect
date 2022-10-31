@@ -7,7 +7,7 @@ use std::io::{BufReader, Read};
 use std::path::PathBuf;
 use std::time::{SystemTime};
 use std::sync::{Arc, Mutex};
-use std::sync::mpsc::channel;
+use threadpool::ThreadPool;
 
 extern crate data_encoding;
 extern crate ring;
@@ -104,71 +104,88 @@ fn sha256_digest<R: Read>(mut reader : R) -> Result<Digest, Error> {
     Ok(context.finish())
 }
 
-// ELAPSED TIME: 759s
-fn traverse_parallel(path: &str) {
-    let value = Arc::new(Mutex::new(FileIndex::new()));
+struct Traverser {
+    workers: ThreadPool,
+}
 
-    traverse_parallel_dir(&path, value.clone());
+impl Traverser {
+    fn new() -> Self {
+        Traverser {
+            workers: ThreadPool::new(std::thread::available_parallelism().unwrap().get()),
+        }
+    }
 
-    println!("DUPLICATES FOUND:");
-    for (key, value) in value.lock().unwrap().files.iter() {
-        if !value.duplicates.is_empty() {
-            println!("(hash: {}): (file: {})", key, value.filename);
-            for duplicate in value.duplicates.iter() {
-                println!("\t{}", duplicate);
+    // ELAPSED TIME: 759s
+    fn parallel(&self, path: &str) {
+        let now = SystemTime::now();
+        let value = Arc::new(Mutex::new(FileIndex::new()));
+
+        self.handle_dir(&path, value.clone());
+
+        self.workers.join();
+
+        let traversal_time = now.elapsed().unwrap().as_secs();
+
+        println!("DUPLICATES FOUND:");
+        for (key, value) in value.lock().unwrap().files.iter() {
+            if !value.duplicates.is_empty() {
+                println!("(hash: {}): (file: {})", key, value.filename);
+                for duplicate in value.duplicates.iter() {
+                    println!("\t{}", duplicate);
+                }
+            }
+        }
+        println!("TOTAL FILES TRAVERSED: {}", value.lock().unwrap().count);
+        println!("TOTAL FILE SIZE: {}", value.lock().unwrap().dupe_size);
+        println!("TRAVERSAL TIME: {}s", traversal_time);
+    }
+
+    fn handle_dir(&self, path: &str, value: Arc<Mutex<FileIndex>>) {
+        let entries = fs::read_dir(path).unwrap();
+
+        for entry in entries {
+            let p = entry.unwrap().path();
+            if p.is_dir() {
+                self.handle_dir(p.to_str().unwrap(), value.clone());
+            } else {
+                let value = value.clone();
+                self.workers.execute(move || {
+                        Traverser::handle_file(p, value)
+                    }
+                );
             }
         }
     }
-    println!("TOTAL FILES TRAVERSED: {}", value.lock().unwrap().count);
-    println!("TOTAL FILE SIZE: {}", value.lock().unwrap().dupe_size);
-}
 
-fn traverse_parallel_dir(path: &str, value: Arc<Mutex<FileIndex>>) {
-    let entries = fs::read_dir(path).unwrap();
-    let mut threads = Vec::new();
+    fn handle_file(p: PathBuf, value: Arc<Mutex<FileIndex>>) {
+        value.lock().unwrap().increment();
 
-    for entry in entries {
-        let p = entry.unwrap().path();
-        if p.is_dir() {
-            traverse_parallel_dir(p.to_str().unwrap(), value.clone());
-        } else {
-            let value = value.clone();
-            let thread = std::thread::spawn(move || {
-                handle_file(p, value);
-            });
-            threads.push(thread);
-        }
-    }
+        let filepath = p.to_str().unwrap().to_string();
+        let file = match File::open(&p) {
+            Ok(file) => file,
+            Err(err) => {
+                println!("error: could not open file: {}: reason: {}", filepath, err);
+                return
+            }
+        };
 
-    for thread in threads {
-        if let Err(e) = thread.join() {
-            panic!("{:?}", e);
-        }
+        let dig = BufReader::new(file);
+        let hashstring = HEXUPPER.encode(
+            sha256_digest(dig).unwrap().as_ref()
+        );
+
+        let metadata = fs::metadata(p).unwrap();
+        value.lock().unwrap().insert(hashstring, filepath, metadata.len());
     }
 }
 
-fn handle_file(p: PathBuf, value: Arc<Mutex<FileIndex>>) {
-    value.lock().unwrap().increment();
-
-    let filepath = p.to_str().unwrap().to_string();
-    let file = match File::open(&p) {
-        Ok(file) => file,
-        Err(err) => {
-            println!("error: could not open file: {}: reason: {}", filepath, err);
-            return
-        }
-    };
-
-    let dig = BufReader::new(file);
-    let hashstring = HEXUPPER.encode(
-        sha256_digest(dig).unwrap().as_ref()
-    );
-
-    let metadata = fs::metadata(p).unwrap();
-    value.lock().unwrap().insert(hashstring, filepath, metadata.len());
-}
-
-// ELAPSED TIME: 137s
+/*
+TOTAL FILES TRAVERSED: 511863
+TOTAL FILE SIZE: 5419915798
+ELAPSED TIME: 85s
+*/
+// ELAPSED TIME: 85s  (using threadpool)
+// ELAPSED TIME: 137s (using threads)
 // ELAPSED TIME: 165s
 fn main() {
     let now = SystemTime::now();
@@ -179,7 +196,9 @@ fn main() {
         return
     }
 
-    traverse_parallel(args[1].as_str());
+    let traverser = Traverser::new();
+
+    traverser.parallel(args[1].as_str());
 
     println!("ELAPSED TIME: {}s", now.elapsed().unwrap().as_secs());
 }

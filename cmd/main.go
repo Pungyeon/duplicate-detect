@@ -69,6 +69,8 @@ func main() {
 
 	wg.Wait()
 
+	traverseTime := time.Since(start)
+
 	for _, value := range duplicates.Get() {
 		if len(value.duplicates) != 0 {
 			fmt.Println(value.filename)
@@ -78,6 +80,7 @@ func main() {
 		}
 	}
 
+	fmt.Println("traversal time", traverseTime)
 	fmt.Println("elapsed time", time.Since(start))
 }
 
