@@ -120,7 +120,7 @@ impl Traverser {
         let now = SystemTime::now();
         let value = Arc::new(Mutex::new(FileIndex::new()));
 
-        self.handle_dir(&path, value.clone());
+        self.handle_dir(path, value.clone());
 
         self.workers.join();
 
@@ -179,14 +179,6 @@ impl Traverser {
     }
 }
 
-/*
-TOTAL FILES TRAVERSED: 511863
-TOTAL FILE SIZE: 5419915798
-ELAPSED TIME: 85s
-*/
-// ELAPSED TIME: 85s  (using threadpool)
-// ELAPSED TIME: 137s (using threads)
-// ELAPSED TIME: 165s
 fn main() {
     let now = SystemTime::now();
     let args : Vec<String> = env::args().collect();
